@@ -2,6 +2,7 @@ const {
   AndroidConfig,
   withInfoPlist,
   withEntitlementsPlist,
+  withAndroidManifest,
 } = require('@expo/config-plugins');
 
 const NFC_READER = 'Interact with nearby NFC devices';
@@ -42,9 +43,9 @@ function addValuesToArray(obj, key, values) {
 function withIosNfcEntitlement(c, {includeNdefEntitlement}) {
   return withEntitlementsPlist(c, (config) => {
     // Add the required formats
-    let entitlements = ['NDEF', 'TAG']
+    let entitlements = ['NDEF', 'TAG'];
     if (includeNdefEntitlement === false) {
-      entitlements = ['TAG']
+      entitlements = ['TAG'];
     }
     config.modResults = addValuesToArray(
       config.modResults,
@@ -84,11 +85,104 @@ function withIosNfcSystemCodes(c, {systemCodes}) {
   });
 }
 
+const GENERATED_TAG = 'data-generated';
+
+function renderIntentFilterData(data) {
+  return (Array.isArray(data) ? data : [data]).filter(Boolean).map((datum) => ({
+    $: Object.entries(datum ?? {}).reduce(
+      (prev, [key, value]) => ({...prev, [`android:${key}`]: value}),
+      {},
+    ),
+  }));
+}
+
+function renderIntentFilterCategory(category) {
+  return (Array.isArray(category) ? category : [category])
+    .filter(Boolean)
+    .map((cat) => ({
+      $: {
+        'android:name': `android.intent.category.${cat}`,
+      },
+    }));
+}
+
+function renderNfcIntentFilters(intentFilters) {
+  return intentFilters.map((intentFilter) => {
+    // <intent-filter>
+    return {
+      $: {
+        'android:autoVerify': intentFilter.autoVerify ? 'true' : undefined,
+        // Add a custom "generated" tag that we can query later to remove.
+        [GENERATED_TAG]: 'true',
+      },
+      action: [
+        // <action android:name="android.intent.action.VIEW"/>
+        {
+          $: {
+            'android:name': `android.nfc.action.${intentFilter.action}`,
+          },
+        },
+      ],
+      data: renderIntentFilterData(intentFilter.data),
+      category: renderIntentFilterCategory(intentFilter.category),
+    };
+  });
+}
+
+function addNfcIntentFilters(c, androidManifest, nfcIntentFilters) {
+  const mainActivity = AndroidConfig.Manifest.getMainActivityOrThrow(
+    androidManifest,
+  );
+
+  // Remove all generated tags from previous runs...
+  if (mainActivity['intent-filter']?.length) {
+    mainActivity['intent-filter'] = mainActivity['intent-filter'].filter(
+      (value) => value.$?.[GENERATED_TAG] !== 'true',
+    );
+  }
+
+  // this needs to be modified such that it picks up the extra intent filters from the config
+  const intentFilters = AndroidConfig.IntentFilters.getIntentFilters(c);
+  if (intentFilters.length + nfcIntentFilters.length === 0) {
+    return androidManifest;
+  }
+
+  // adds them to the manifest
+  mainActivity['intent-filter'] = mainActivity['intent-filter']?.concat(
+    AndroidConfig.IntentFilters.default(intentFilters),
+    renderNfcIntentFilters(nfcIntentFilters),
+  );
+
+  return androidManifest;
+}
+
+const withNfcIntentFilters = (c, {intentFilters}) => {
+  /**
+   * Modify the AndroidManifest.xml to add the NFC intent filters.
+   */
+  return withAndroidManifest(c, (config) => {
+    config.modResults = addNfcIntentFilters(
+      config,
+      config.modResults,
+      intentFilters,
+    );
+
+    return config;
+  });
+};
+
 function withNfc(config, props = {}) {
-  const {nfcPermission, selectIdentifiers, systemCodes, includeNdefEntitlement} = props;
+  const {
+    nfcPermission,
+    selectIdentifiers,
+    systemCodes,
+    includeNdefEntitlement,
+    intentFilters,
+  } = props;
   config = withIosNfcEntitlement(config, {includeNdefEntitlement});
   config = withIosNfcSelectIdentifiers(config, {selectIdentifiers});
   config = withIosNfcSystemCodes(config, {systemCodes});
+  config = withNfcIntentFilters(config, {intentFilters});
 
   // We start to support Android 12 from v3.11.1, and you will need to update compileSdkVersion to 31,
   // otherwise the build will fail:
